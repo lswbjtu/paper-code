@@ -1,37 +1,55 @@
-import datetime
-
-import numpy as np
 import pandas as pd
+import numpy as np
+
+import datetime as dt
+from dateutil.relativedelta import relativedelta
+
+pd.options.mode.chained_assignment = None  # default='warn'
+
 
 pd.options.mode.chained_assignment = None  # default='warn'
 
 # %matplotlib inline
 
 
-# a test line
+#import xgboost
 
-jobname_mbj="MASTERBATCH"
+from sklearn.linear_model import LinearRegression,LassoCV,RidgeCV
+from sklearn.decomposition import SparsePCA,PCA
+from sklearn.svm import SVR
+from sklearn.preprocessing import MinMaxScaler
+
+import matplotlib.pyplot as plt
+#%matplotlib inline
+
+import datetime
+
+
 
 class BatchJob:
-    def __init__(self,pJobListPath,pJobRunDataPath,pCalendarPath,pTransRatePath,pEventPath):
-        self.JobListPath=pJobListPath
-        self.JobRunDataPath=pJobRunDataPath
-        self.CalendarPath=pCalendarPath
-        self.TransRatePath=pTransRatePath
-        self.EventPath=pEventPath
+    def __init__(self,pAllDataPath):
+        self.JOBNAME_MBJ = "MASTERBATCH"
+        self.AllDataPath=pAllDataPath
 
-        self.dfCoreFeatures=pd.DataFrame()
-#        self.dfCoreFeatures = self.GenCoreFeatures()
+#        self.dfCoreFeatures=pd.DataFrame()
+        self.dfEvent = pd.read_excel(self.AllDataPath, sheetname='event')
+        self.dfJobListData = pd.read_excel(self.AllDataPath, sheetname='job_list', usecols=['JOBNAME','M1BEGINDATE','M1LASTDATE'])
 
-        self.JobName=jobname_mbj
+        self.JobName = self.JOBNAME_MBJ
         self.TargetDate=datetime.date.today()
-        self.dfEvent=pd.read_excel(pEventPath)
+
+        self.GenCoreFeatures()
+        self.GenJobNameFeatures()
+
+
 
 
     def GenCoreFeatures(self):
-        dfTransRate= pd.read_excel(pTransRatePath)
-        dfTransRate['DATE']=dfTransRate['DATE'].apply(lambda x: x+ datetime.timedelta(days=1))
+        dfTransRate = pd.read_excel(self.AllDataPath,sheetname='trans_rate')
+
+        dfTransRate['DATE'] = dfTransRate['DATE'].apply(lambda x: x+ datetime.timedelta(days=1))
         dfTransRate = dfTransRate.fillna(value=0)
+        dfTransRate['All'] = dfTransRate.iloc[:,1:].sum(axis=1)
 
         def set_batch_type(x):
             if x == 'd01':
@@ -41,30 +59,41 @@ class BatchJob:
                     return '2'
             return '0'
 
-        dfCalendar=pd.read_excel(pCalendarPath)
-        dfCalendar['batch_type'] = dfCalendar['Day'].apply(lambda x: set_batch_type(x))
+        dfCalendar = pd.read_excel(self.AllDataPath,sheetname='calendar')
+        dfCalendar['batch_type'] = dfCalendar['DAY'].apply(lambda x: set_batch_type(x))
 
 
+        self.dfCoreFeatures = dfTransRate.merge(dfCalendar,on=["DATE"],how='left')
+           # .merge(dfEvent,on=['DATE'],how='left')
+        #return dfCoreFeatures
 
-        dfEvent=pd.read_excel(pEventPath)
+    def GenJobNameFeatures(self):
+        dfJobRunData = pd.read_excel(self.AllDataPath,sheetname='job_run_data',usecols=['JOBNAME','START_DATE','NA1'])##NA1 is RUNTIME
+        dfJobRunData.rename(columns={'START_DATE': 'DATE', 'NA1': 'RUNTIME'}, inplace=True)
 
-        self.dfCoreFeatures=dfTransRate.join(dfCalendar,on=["DATE"],how='left')
-            #.join(dfEvent,on=['DATE'],how='left')
+        dfJobNameRunData = dfJobRunData[dfJobRunData['JOBNAME'] == self.JobName]
+        dfJobNameRunData['IsRun'] = np.ones(len(dfJobNameRunData), dtype=int)
+
+        dfMasterBatch = pd.read_excel(self.AllDataPath,sheetname='master_batch')
+        dfMasterBatch.rename(columns={'START_DATE': 'DATE'}, inplace=True)
+        dfMasterBatch['IsRun'] = np.ones(len(dfMasterBatch), dtype=int)
+
+        dfJobCriticalPath = pd.read_excel(self.AllDataPath,sheetname='job_criticalpath',usecols=['DATE','JOBNAME'])
+        JobNameCriticalPath = dfJobCriticalPath[dfJobCriticalPath['JOBNAME'] == self.JobName]
+        JobNameCriticalPath['IsCriticalPath'] = np.ones(len(JobNameCriticalPath), dtype=int)
+
+        if self.JobName=='MASTERBATCH':
+            self.dfJobNameFeature = self.dfCoreFeatures.merge(dfMasterBatch,on='DATE',how='left')\
+                .merge(JobNameCriticalPath[['DATE','IsCriticalPath']],on='DATE',how='left')
+
+        else:
+            self.dfJobNameFeature = self.dfCoreFeatures.merge(dfJobNameRunData['DATE', 'RUNTIME', 'IsRun'], on='DATE',how='left')\
+                .merge(JobNameCriticalPath[['DATE', 'IsCriticalPath']], on='DATE', how='left')
+
+        self.dfJobNameFeature = self.dfJobNameFeature.fillna(value=0)
 
 
-
-
-       # dfJobRunData=pd.read_csv(pJobRunDataPath)
-
-    def AtomPrediction(self,JobName,BeginDate,SplitDate,EndDate):
-        print('hello,world')
-
-    # set weight for specific days, 8 times for last month, 4 times for last 2nd month and same month of last year
-
-
-
-
-    def last_event(self,jobname,split_date):
+    def LastEvent(self,jobname,split_date):
 
         def match_scope(jobname, scope):
             if scope == 'ALL':
@@ -75,17 +104,19 @@ class BatchJob:
                 return False
 
         #find the latest event before splitdate, jobname is in the scope of 'SCOPE'
-        df=self.dfEvent[(self.dfEvent['DATE']<=split_date)].sort_values(by=['DATE'],axis=0,ascending=False)
+        df=self.dfEvent[(self.dfEvent['DATE']<=split_date)&(self.dfEvent['IMPACT']>0)].sort_values(by=['DATE'],axis=0,ascending=False)
         for i in range(len(df)):
-            if match_scope(jobname,df[i]['SCOPE']):
-                return df.irow[i]
+            if match_scope(jobname,df.at[i,'SCOPE']):
+                df=df.iloc[i:i+1]
+                df=df.reset_index(drop=True)
+                return df
         return pd.DataFrame()  #np.nan  #or null df
 
 
 
 
 
-    def split_train_test_with_weight(self,widetable, begin_date, split_date, end_date):
+    def SplitTrainTestWithWeight(self,widetable, begin_date, split_date, end_date):
 
         widetable_frq = widetable.copy()
         l_date = pd.to_datetime(split_date)
@@ -96,10 +127,10 @@ class BatchJob:
         l_12month_ago = (l_date + relativedelta(months=-12)).strftime("%Y-%m-%d")
         l_1month_later = (l_date + relativedelta(months=+1)).strftime("%Y-%m-%d")
 
-        l_delta=widetable['RUNTIME'].mean/1000 #use l_delta to make duplicated runtime a little different so avoid over-fit to specific value
+        l_delta=widetable['RUNTIME'].mean()/100 #use l_delta to make duplicated runtime a little different so avoid over-fit to specific value
 
         for i in range(16):
-            df = widetable[(widetable['DATE'] >= l_1month_ago) & (widetable['DATE'] < split_date)]
+            df = widetable[(widetable['DATE'] >= l_1month_ago) & (widetable['DATE'] <= split_date)]
             df.loc['RUNTIME'] = df['RUNTIME'].apply(lambda x: x + np.random.random()*l_delta)
             widetable_frq = widetable_frq.append(df, ignore_index=True)
         for i in range(4):
@@ -115,22 +146,44 @@ class BatchJob:
             df.loc['RUNTIME'] = df['RUNTIME'].apply(lambda x: x + np.random.random()*l_delta)
             widetable_frq = widetable_frq.append(df, ignore_index=True)
 
+        l_times=0
+        l_event=self.LastEvent(self.JobName,split_date)
+        l_job=self.dfJobListData[self.dfJobListData['JOBNAME']==self.JobName]
+        l_begindate=l_job.at[0,'M1BEGINDATE']
+        l_begindate=max(l_begindate,pd.to_datetime(begin_date))
+        if len(l_event)>0:
+            l_event_date=l_event.at[0,'DATE']
+            l_event_impact=pd.to_numeric(l_event.at[0,'IMPACT'])
+            if l_event_impact==100:
+                l_begindate=max(l_begindate,l_event_date)
+            else: # between 0 and 100
+                l_times=l_event_impact/(100-l_event_impact)
+                l_before_len=len(widetable_frq[(widetable_frq['DATE'] >= l_begindate) & (widetable_frq['DATE'] < l_event_date)])
+                l_after_len=len(widetable_frq[(widetable_frq['DATE'] >= l_event_date) & (widetable_frq['DATE'] <= split_date)])
+                l_needadd=int(l_before_len*l_times-l_after_len)
+                l_times=int(np.ceil(l_before_len*l_times/l_after_len)-1)
+
+        widetable_frq=widetable_frq[(widetable_frq['DATE'] >= l_begindate) & (widetable_frq['DATE'] <=end_date )]
+
+        if l_times>0:
+            df = widetable_frq[(widetable_frq['DATE'] >= l_event_date) & (widetable_frq['DATE'] <= split_date)]
+            widetable_add=pd.DataFrame()
+            for i in range(l_times):
+                df.loc['RUNTIME'] = df['RUNTIME'].apply(lambda x: x + np.random.random() * l_delta)
+                widetable_add = widetable_add.append(df, ignore_index=True)
+            widetable_frq.append(widetable_add.sample(l_needadd))
 
 
         l_wt_train = widetable_frq[
-            (widetable_frq['DATE'] < split_date) & (widetable_frq['DATE'] >= '2016-01-01')]
+            (widetable_frq['DATE'] <= split_date) & (widetable_frq['DATE'] >= l_begindate)]
         l_wt_test = widetable_frq[
-            (widetable_frq['DATE'] < l_1month_later) & (widetable_frq['DATE'] >= split_date)]
+            (widetable_frq['DATE'] <= end_date) & (widetable_frq['DATE'] > split_date)]
         return l_wt_train, l_wt_test
 
 
-pDataPath=r'/Users/zhuoling/Documents/ML/ICBC/BatchJob/201712/'
-pJobListPath=pDataPath+r'job_list.csv'
-pJobRunDataPath=pDataPath+r'job_run_data.csv'
-pCalendarPath=pDataPath+r'calendar.xlsx'
-pTransRatePath=pDataPath+r'trans_rate.xlsx'
-pEventPath=pDataPath+r'event.xlsx'
 
-bj = BatchJob(pJobListPath,pJobRunDataPath,pCalendarPath,pTransRatePath,pEventPath)
-bj.GenCoreFeatures()
-bj.AtomPrediction(jobname_mbj,'2000-01-01','2017-07-15','2017-08-07')
+    def AtomPrediction(self,JobName,BeginDate,SplitDate,EndDate):
+        print(self.dfJobNameFeature.head(5))
+        #TrainDate = np.range(SplitDate-BeginDate).days
+
+
